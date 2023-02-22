@@ -2,7 +2,7 @@
 Microservice worker that uses OpenAI's Whisper model to download and transcribe videos.
 """
 import modal
-from typing import Iterator, TextIO, Hashable
+from typing import Iterator, TextIO
 
 # TODO: Cache Whisper and align model(s) instead of redownload every time
 app_image = (
@@ -18,9 +18,6 @@ app_image = (
 
 stub = modal.Stub("vtscribe", image=app_image)
 
-VIDEO_ID = 'IxiUmUXPGkw'
-# TODO: Get as argument from endpoint
-
 YT_DLP_DOWNLOAD_FILE_TEMPL = '%(id)s.%(ext)s'
 
 WHISPER_MODEL_NAME = 'medium'
@@ -32,14 +29,13 @@ volume = modal.SharedVolume().persist('vtscribe-cache-vol')
 if stub.is_inside():
     from loguru import logger
 
-# TODO: Convert to Modal fastapi endpoint
-@stub.local_entrypoint
-def main():
-    video_id = VIDEO_ID
 
+@stub.webhook(method="POST")
+def transcribe(video_id: str):
     download_audio.call('https://www.youtube.com/watch?v=' + video_id)
     input_file_name = f"vtscribe/{video_id}.mp3"
-    do_transcribe.call(input_file_name)
+    result = do_transcribe.call(input_file_name)
+    return result['text']
 
 
 @stub.function(image=app_image, shared_volumes={CACHE_DIR: volume})
@@ -94,7 +90,7 @@ def write_vtt(transcript: Iterator[dict], file: TextIO):
 
 
 @stub.function(image=app_image, shared_volumes={CACHE_DIR: volume}, gpu="any")
-def do_transcribe(audio_file_name: str) -> Hashable:
+def do_transcribe(audio_file_name: str) -> dict:
     """Perform transcription of an audio file using Whisper.
     Writes a VTT sub file to disk in the end in the format of `{audio_file_name}.vtt`
 
@@ -132,7 +128,7 @@ def do_transcribe(audio_file_name: str) -> Hashable:
     alignment_model, metadata = whisperx.load_align_model(
         language_code=result["language"], device=device)
 
-    result_aligned: Hashable = whisperx.align(
+    result_aligned: dict = whisperx.align(
         result["segments"], alignment_model, metadata, audio_file_name, device)
 
     for segment in result_aligned["segments"]:
