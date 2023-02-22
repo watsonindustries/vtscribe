@@ -4,6 +4,7 @@ Microservice worker that uses OpenAI's Whisper model to download and transcribe 
 import modal
 from typing import Iterator, TextIO, Hashable
 
+# TODO: Cache Whisper and align model(s) instead of redownload every time
 app_image = (
     modal.Image.debian_slim()
     .apt_install("ffmpeg", "git")
@@ -18,6 +19,7 @@ app_image = (
 stub = modal.Stub("vtscribe", image=app_image)
 
 VIDEO_ID = 'IxiUmUXPGkw'
+# TODO: Get as argument from endpoint
 
 YT_DLP_DOWNLOAD_FILE_TEMPL = '%(id)s.%(ext)s'
 
@@ -30,7 +32,7 @@ volume = modal.SharedVolume().persist('vtscribe-cache-vol')
 if stub.is_inside():
     from loguru import logger
 
-
+# TODO: Convert to Modal fastapi endpoint
 @stub.local_entrypoint
 def main():
     video_id = VIDEO_ID
@@ -42,6 +44,11 @@ def main():
 
 @stub.function(image=app_image, shared_volumes={CACHE_DIR: volume})
 def download_audio(url: str):
+    """Downloads audio track for a given web video URL as an mp3.
+
+    Args:
+        url (str): URL of a video to download audio track of.
+    """
     import yt_dlp
 
     ydl_opts = {
@@ -86,9 +93,10 @@ def write_vtt(transcript: Iterator[dict], file: TextIO):
         )
 
 
-@stub.function(image=app_image, shared_volumes={CACHE_DIR: volume})
+@stub.function(image=app_image, shared_volumes={CACHE_DIR: volume}, gpu="any")
 def do_transcribe(audio_file_name: str) -> Hashable:
     """Perform transcription of an audio file using Whisper.
+    Writes a VTT sub file to disk in the end in the format of `{audio_file_name}.vtt`
 
     Args:
         audio_file_name (str): path to mp3 audio file
@@ -102,7 +110,7 @@ def do_transcribe(audio_file_name: str) -> Hashable:
     stream = ffmpeg.input(audio_file_name)
     stream = ffmpeg.output(stream, output_file, **
                            {'ar': '16000', 'acodec': 'pcm_s16le'})
-    ffmpeg.run(stream)
+    ffmpeg.run(stream, overwrite_output=True, quiet=True)
 
     logger.info("Finished downsampling file: {}", output_file)
     logger.info("Preparing to transcribe file {}", output_file)
