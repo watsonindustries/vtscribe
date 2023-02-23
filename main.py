@@ -2,9 +2,10 @@
 Microservice worker that uses OpenAI's Whisper model to download and transcribe videos.
 """
 import modal
+import pathlib
 from typing import Iterator, TextIO
+from fastapi.responses import JSONResponse
 
-# TODO: Cache Whisper and align model(s) instead of redownload every time
 app_image = (
     modal.Image.debian_slim()
     .apt_install("ffmpeg", "git")
@@ -18,11 +19,17 @@ app_image = (
 
 stub = modal.Stub("vtscribe", image=app_image)
 
+# Config
+
 YT_DLP_DOWNLOAD_FILE_TEMPL = '%(id)s.%(ext)s'
 
 WHISPER_MODEL_NAME = 'medium'
 
-CACHE_DIR = '/root/vtscribe'
+CACHE_DIR = '/cache'
+# Where downloaded VOD audio files are stored, by video ID.
+RAW_AUDIO_DIR = pathlib.Path(CACHE_DIR, "raw_audio")
+# Location of modal checkpoint.
+MODEL_DIR = pathlib.Path(CACHE_DIR, "model")
 
 volume = modal.SharedVolume().persist('vtscribe-cache-vol')
 
@@ -33,9 +40,10 @@ if stub.is_inside():
 @stub.webhook(method="POST")
 def transcribe(video_id: str):
     download_audio.call('https://www.youtube.com/watch?v=' + video_id)
-    input_file_name = f"vtscribe/{video_id}.mp3"
-    result = do_transcribe.call(input_file_name)
-    return result['text']
+    input_raw_file: str = f"{CACHE_DIR}/{video_id}.mp3"
+    result = do_transcribe.call(input_raw_file)
+
+    return JSONResponse(content=result, status_code=200)
 
 
 @stub.function(image=app_image, shared_volumes={CACHE_DIR: volume})
@@ -54,7 +62,7 @@ def download_audio(url: str):
             'preferredcodec': 'mp3',
             'preferredquality': '192',
         }],
-        'outtmpl': f"vtscribe/{YT_DLP_DOWNLOAD_FILE_TEMPL}"
+        'outtmpl': CACHE_DIR + '/' + YT_DLP_DOWNLOAD_FILE_TEMPL
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -93,6 +101,7 @@ def write_vtt(transcript: Iterator[dict], file: TextIO):
 def do_transcribe(audio_file_name: str) -> dict:
     """Perform transcription of an audio file using Whisper.
     Writes a VTT sub file to disk in the end in the format of `{audio_file_name}.vtt`
+    Returns a Pandas dataframe
 
     Args:
         audio_file_name (str): path to mp3 audio file
@@ -113,9 +122,10 @@ def do_transcribe(audio_file_name: str) -> dict:
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    logger.info("Using device: {}", device)
+    logger.info("Using device: {} model: {}", device, WHISPER_MODEL_NAME)
 
-    whisper_model = whisperx.load_model("medium.en", device)
+    whisper_model = whisperx.load_model(
+        WHISPER_MODEL_NAME, device=device, download_root=MODEL_DIR)
     result = whisper_model.transcribe(output_file)
 
     # Garbage collect everything before loading alignment model
@@ -125,15 +135,20 @@ def do_transcribe(audio_file_name: str) -> dict:
 
     logger.info("Running alignment model...")
 
+    # TODO: Figure out how to set cache root dir for align model download
     alignment_model, metadata = whisperx.load_align_model(
         language_code=result["language"], device=device)
 
-    result_aligned: dict = whisperx.align(
+    result_aligned = whisperx.align(
         result["segments"], alignment_model, metadata, audio_file_name, device)
+
+    res_segments = []
 
     for segment in result_aligned["segments"]:
         print(format_timestamp(segment['start']), segment['text'])
+        res_segments.append(
+            {'start': segment['start'], 'text': segment['text']})
 
     logger.info("Finished transcribing file {}", audio_file_name)
 
-    return result_aligned
+    return {'segments': res_segments, 'text': result['text'], 'language': result['language']}
