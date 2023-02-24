@@ -145,9 +145,12 @@ def do_transcribe(audio_file_name: str) -> dict:
     res_segments = []
 
     for segment in result_aligned["segments"]:
-        print(format_timestamp(segment['start']), segment['text'])
+        start = segment['start']
+        end = segment['end']
+        text = segment['text']
+        print(format_timestamp(start), text)
         res_segments.append(
-            {'start': segment['start'], 'text': segment['text']})
+            {'start': start, 'end': end, 'text': text})
 
     logger.info("Finished transcribing file {}", audio_file_name)
 
