@@ -12,7 +12,8 @@ app_image = (
     .pip_install(
         "ffmpeg-python",
         "loguru==0.6.0",
-        "yt-dlp==2023.2.17",
+        # "yt-dlp==2023.2.17",
+        "git+https://github.com/yt-dlp/yt-dlp.git@master",
         "git+https://github.com/Blair-Johnson/batch-whisper.git@main"
         # "git+https://github.com/m-bain/whisperx.git@main"
     )
