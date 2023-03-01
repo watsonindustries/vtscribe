@@ -12,8 +12,9 @@ app_image = (
     .pip_install(
         "ffmpeg-python",
         "loguru==0.6.0",
-        "yt-dlp",
-        "git+https://github.com/m-bain/whisperx.git@main"
+        "yt-dlp==2023.2.17",
+        "git+https://github.com/Blair-Johnson/batch-whisper.git@main"
+        # "git+https://github.com/m-bain/whisperx.git@main"
     )
 )
 
@@ -23,7 +24,7 @@ stub = modal.Stub("vtscribe", image=app_image)
 
 YT_DLP_DOWNLOAD_FILE_TEMPL = '%(id)s.%(ext)s'
 
-WHISPER_MODEL_NAME = 'medium'
+WHISPER_MODEL_NAME = 'medium.en'
 
 CACHE_DIR = '/cache'
 # Where downloaded VOD audio files are stored, by video ID.
@@ -37,7 +38,7 @@ if stub.is_inside():
     from loguru import logger
 
 
-@stub.webhook(method="POST")
+@stub.webhook(method="POST", wait_for_response=True, timeout=4000)
 def transcribe(video_id: str):
     download_audio.call('https://www.youtube.com/watch?v=' + video_id)
     input_raw_file: str = f"{CACHE_DIR}/{video_id}.mp3"
@@ -46,7 +47,7 @@ def transcribe(video_id: str):
     return JSONResponse(content=result, status_code=200)
 
 
-@stub.function(image=app_image, shared_volumes={CACHE_DIR: volume})
+@stub.function(image=app_image, shared_volumes={CACHE_DIR: volume}, timeout=2000)
 def download_audio(url: str):
     """Downloads audio track for a given web video URL as an mp3.
 
@@ -97,7 +98,7 @@ def write_vtt(transcript: Iterator[dict], file: TextIO):
         )
 
 
-@stub.function(image=app_image, shared_volumes={CACHE_DIR: volume}, gpu="any")
+@stub.function(image=app_image, shared_volumes={CACHE_DIR: volume}, gpu="T4", timeout=3000)
 def do_transcribe(audio_file_name: str) -> dict:
     """Perform transcription of an audio file using Whisper.
     Writes a VTT sub file to disk in the end in the format of `{audio_file_name}.vtt`
@@ -107,8 +108,11 @@ def do_transcribe(audio_file_name: str) -> dict:
         audio_file_name (str): path to mp3 audio file
     """
     import torch
-    import whisperx
+    import whisper
     import ffmpeg
+    import time
+
+    start_time = time.time()
 
     output_file = audio_file_name.replace(".mp3", ".wav")
     logger.info("Downsampling file {} --> {}", audio_file_name, output_file)
@@ -124,8 +128,11 @@ def do_transcribe(audio_file_name: str) -> dict:
 
     logger.info("Using device: {} model: {}", device, WHISPER_MODEL_NAME)
 
-    whisper_model = whisperx.load_model(
+    whisper_model = whisper.load_model(
         WHISPER_MODEL_NAME, device=device, download_root=MODEL_DIR)
+
+    logger.info("Starting transcription...")
+
     result = whisper_model.transcribe(output_file)
 
     # Garbage collect everything before loading alignment model
@@ -133,18 +140,20 @@ def do_transcribe(audio_file_name: str) -> dict:
     # gc.collect()
     # torch.cuda.empty_cache()
 
-    logger.info("Running alignment model...")
+    # logger.info("Running alignment model...")
 
     # TODO: Figure out how to set cache root dir for align model download
-    alignment_model, metadata = whisperx.load_align_model(
-        language_code=result["language"], device=device)
+    # alignment_model, metadata = whisper.load_align_model(
+    #     language_code=result["language"], device=device)
 
-    result_aligned = whisperx.align(
-        result["segments"], alignment_model, metadata, audio_file_name, device)
+    # result_aligned = whisperx.align(
+    #     result["segments"], alignment_model, metadata, audio_file_name, device)
+
+    end_time = time.time()
 
     res_segments = []
 
-    for segment in result_aligned["segments"]:
+    for segment in result["segments"]:
         start = segment['start']
         end = segment['end']
         text = segment['text']
@@ -152,6 +161,9 @@ def do_transcribe(audio_file_name: str) -> dict:
         res_segments.append(
             {'start': start, 'end': end, 'text': text})
 
-    logger.info("Finished transcribing file {}", audio_file_name)
+    exec_time = end_time - start_time
+
+    logger.info("Finished transcribing file {} in {} seconds",
+                audio_file_name, exec_time)
 
     return {'segments': res_segments, 'text': result['text'], 'language': result['language']}
