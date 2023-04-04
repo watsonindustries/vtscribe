@@ -5,13 +5,14 @@ import modal
 import pathlib
 import dataclasses
 import json
-from typing import Iterator, TextIO, Tuple
+from typing import Iterator, Tuple
 from fastapi.responses import JSONResponse
 
 app_image = (
     modal.Image.debian_slim()
     .apt_install("ffmpeg", "git")
     .pip_install(
+        "boto3",
         "ffmpeg-python",
         "torchaudio==0.12.1",
         "loguru==0.6.0",
@@ -20,7 +21,13 @@ app_image = (
     )
 )
 
-stub = modal.Stub("vtscribe", image=app_image)
+MODAL_STUB_NAME = 'vtscribe'
+MODAL_SECRETS_NAME = 'vtscribe-secrets'
+
+DO_DEFAULT_BUCKET_NAME = 'holosays'
+
+stub = modal.Stub(MODAL_STUB_NAME, image=app_image, secrets=[
+                  modal.Secret.from_name(MODAL_SECRETS_NAME)])
 
 # Config
 
@@ -32,14 +39,25 @@ class ModelSpec:
     relative_speed: int  # Higher is faster
 
 
-YT_DLP_DOWNLOAD_FILE_TEMPL = '%(id)s.%(ext)s'
-
 DEFAULT_WHISPER_MODEL = ModelSpec(
     name="medium.en", params="769M", relative_speed=2)
 
+
+@dataclasses.dataclass
+class JobSpec:
+    video_id: str
+    whisper_model: ModelSpec = DEFAULT_WHISPER_MODEL
+    bucket_for_upload_name: str = 'holosays'
+
+    def yt_video_url(self) -> str:
+        return 'https://www.youtube.com/watch?v=' + self.video_id
+
+
+YT_DLP_DOWNLOAD_FILE_TEMPL = '%(id)s.%(ext)s'
+
+
 CACHE_DIR = '/cache'
-# Where downloaded VOD audio files are stored, by video ID.
-RAW_AUDIO_DIR = pathlib.Path(CACHE_DIR, "raw_audio")
+
 # Location of modal checkpoint.
 MODEL_DIR = pathlib.Path(CACHE_DIR, "model")
 
@@ -47,21 +65,38 @@ MODEL_DIR = pathlib.Path(CACHE_DIR, "model")
 volume = modal.SharedVolume().persist('vtscribe-cache-vol')
 
 if stub.is_inside():
-    from loguru import logger
+    from loguru import logger  # TODO: Replace with Python Logger
 
 
-@stub.webhook(method="POST", wait_for_response=True, timeout=40000)
-def transcribe(video_id: str, model=DEFAULT_WHISPER_MODEL):
-    download_audio.call('https://www.youtube.com/watch?v=' + video_id)
-    input_raw_file: str = f"{CACHE_DIR}/{video_id}.mp3"
-    result = do_transcribe.call(input_raw_file, model=model)
-
-    return JSONResponse(content=result, status_code=200)
+@stub.function(timeout=40000, secret=modal.Secret.from_name("vtscribe-secrets"))
+@stub.web_endpoint(method="POST", wait_for_response=True)
+def transcribe(video_id: str):
+    return transcribe_vod.call(JobSpec(video_id=video_id))
 
 
 @stub.function(image=app_image, shared_volumes={CACHE_DIR: volume}, timeout=3000)
-def download_audio(url: str):
-    """Downloads audio track for a given web video URL as an mp3.
+def transcribe_vod(job_spec: JobSpec):
+    """Main worker function for VOD transcription.
+
+    Args:
+        job_spec (JobSpec): A job spec describing what needs to be done.
+
+    Returns:
+        _type_: _description_
+    """
+    download_audio.call(job_spec.yt_video_url())
+    input_raw_file_path: str = f"{CACHE_DIR}/{job_spec.video_id}.mp3"
+    result_metadata = do_transcribe.call(
+        input_raw_file_path, model=job_spec.whisper_model, result_path=f"{CACHE_DIR}/{job_spec.video_id}-result.json")
+    upload_to_obj_storage.call(
+        result_metadata['result_file_name'], result_metadata['result_path'])
+
+    return JSONResponse(content=result_metadata, status_code=200)
+
+
+@stub.function(image=app_image, shared_volumes={CACHE_DIR: volume}, timeout=3000)
+def download_audio(yt_video_url: str):
+    """Downloads audio track for a given Youtube video URL as an mp3.
 
     Args:
         url (str): URL of a video to download audio track of.
@@ -79,25 +114,8 @@ def download_audio(url: str):
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        error_code = ydl.download(url)
+        error_code = ydl.download(yt_video_url)
         logger.info("Finished downloading with code: {}", error_code)
-
-
-def format_timestamp(seconds: float, always_include_hours: bool = False, decimal_marker: str = '.') -> str:
-    assert seconds >= 0, "non-negative timestamp expected"
-    milliseconds = round(seconds * 1000.0)
-
-    hours = milliseconds // 3_600_000
-    milliseconds -= hours * 3_600_000
-
-    minutes = milliseconds // 60_000
-    milliseconds -= minutes * 60_000
-
-    seconds = milliseconds // 1_000
-    milliseconds -= seconds * 1_000
-
-    hours_marker = f"{hours:02d}:" if always_include_hours or hours > 0 else ""
-    return f"{hours_marker}{minutes:02d}:{seconds:02d}{decimal_marker}{milliseconds:03d}"
 
 
 @stub.function(
@@ -150,21 +168,25 @@ def transcribe_segment(
 
 
 @stub.function(image=app_image, shared_volumes={CACHE_DIR: volume}, timeout=30000)
-def do_transcribe(audio_file_name: str, model: ModelSpec, result_path: str = "result.json") -> dict:
+def do_transcribe(input_audio_file_path: str, model: ModelSpec, result_path: str = "result.json") -> dict:
     """Perform transcription of an audio file using Whisper.
-    Returns a Pandas dataframe
+    Returns a dict of metadata of the result
 
     Args:
-        audio_file_name (str): path to mp3 audio file
+        input_audio_file_path (str): path to mp3 audio file to transcribe
+        model (ModelSpec): Whisper model to use for transcription
+        result_path (str): path to output results file, must be JSON
     """
     import ffmpeg
     import time
+    import os
 
     start_time = time.time()
 
-    output_file = audio_file_name.replace(".mp3", ".wav")
-    logger.info("Downsampling file {} --> {}", audio_file_name, output_file)
-    stream = ffmpeg.input(audio_file_name)
+    output_file = input_audio_file_path.replace(".mp3", ".wav")
+    logger.info("Downsampling file {} --> {}",
+                input_audio_file_path, output_file)
+    stream = ffmpeg.input(input_audio_file_path)
     stream = ffmpeg.output(stream, output_file, **
                            {'ar': '16000', 'acodec': 'pcm_s16le'})
     ffmpeg.run(stream, overwrite_output=True, quiet=True)
@@ -180,6 +202,7 @@ def do_transcribe(audio_file_name: str, model: ModelSpec, result_path: str = "re
         segment_gen, kwargs=dict(audio_filepath=output_file, model=model)
     ):
         output_text += result["text"]
+        # TODO: Trim numeric token values from segment
         output_segments += result["segments"]
 
     result = {
@@ -197,9 +220,15 @@ def do_transcribe(audio_file_name: str, model: ModelSpec, result_path: str = "re
     exec_time = end_time - start_time
 
     logger.info("Finished transcribing file {} in {} seconds",
-                audio_file_name, exec_time)
+                input_audio_file_path, exec_time)
 
-    return result
+    metadata = {'result_path': result_path,
+                'result_file_name': os.path.basename(result_path),
+                'src_audio_file_name': input_audio_file_path}
+
+    logger.info("Metadata: {} cwd: {}", metadata, os.getcwd())
+
+    return metadata
 
 # Adapted from https://github.com/modal-labs/modal-examples/blob/26c911ba880a1311e748c6b01f911d065aed4cc4/06_gpu_and_ml/whisper_pod_transcriber/pod_transcriber/main.py#L282
 
@@ -252,3 +281,20 @@ def split_silences(
         yield cur_start, duration
         num_segments += 1
     print(f"Split {path} into {num_segments} segments")
+
+
+@stub.function(image=app_image, shared_volumes={CACHE_DIR: volume}, timeout=3000)
+def upload_to_obj_storage(bucket_path: str, local_file_path: str, bucket_name=DO_DEFAULT_BUCKET_NAME):
+    import boto3
+    import os
+
+    logger.info("Uploading to bucket: {} to: {} from: {}",
+                bucket_name, bucket_path, local_file_path)
+
+    s3 = boto3.resource('s3',
+                        endpoint_url='https://ams3.digitaloceanspaces.com',
+                        aws_access_key_id=os.environ["DO_SPACE_HOLOSAYS_KEY"],
+                        aws_secret_access_key=os.environ["DO_SPACE_HOLOSAYS_SECRET"])
+
+    # Upload the JSON file to the Space
+    s3.Object(bucket_name, bucket_path).put(Body=open(local_file_path, 'rb'))
