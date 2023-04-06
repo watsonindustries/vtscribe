@@ -3,10 +3,11 @@ Microservice worker that uses OpenAI's Whisper model to download and transcribe 
 """
 import modal
 import pathlib
-import dataclasses
 import json
 from typing import Iterator, Tuple
 from fastapi.responses import JSONResponse
+
+from . import config
 
 app_image = (
     modal.Image.debian_slim()
@@ -16,51 +17,16 @@ app_image = (
         "ffmpeg-python",
         "torchaudio==0.12.1",
         "loguru==0.6.0",
+        # Youtube API keeps changing frequently, so we want the latest and greatest
         "git+https://github.com/yt-dlp/yt-dlp.git@master",
         "https://github.com/openai/whisper/archive/9f70a352f9f8630ab3aa0d06af5cb9532bd8c21d.tar.gz"
     )
 )
 
-MODAL_STUB_NAME = 'vtscribe'
-MODAL_SECRETS_NAME = 'vtscribe-secrets'
-
-DO_DEFAULT_BUCKET_NAME = 'holosays'
-
-stub = modal.Stub(MODAL_STUB_NAME, image=app_image, secrets=[
-                  modal.Secret.from_name(MODAL_SECRETS_NAME)])
+stub = modal.Stub(config.MODAL_STUB_NAME, image=app_image, secrets=[
+                  modal.Secret.from_name(config.MODAL_SECRETS_NAME)])
 
 # Config
-
-
-@dataclasses.dataclass
-class ModelSpec:
-    name: str
-    params: str
-    relative_speed: int  # Higher is faster
-
-
-DEFAULT_WHISPER_MODEL = ModelSpec(
-    name="medium.en", params="769M", relative_speed=2)
-
-
-@dataclasses.dataclass
-class JobSpec:
-    video_id: str
-    whisper_model: ModelSpec = DEFAULT_WHISPER_MODEL
-    bucket_for_upload_name: str = 'holosays'
-
-    def yt_video_url(self) -> str:
-        return 'https://www.youtube.com/watch?v=' + self.video_id
-
-
-YT_DLP_DOWNLOAD_FILE_TEMPL = '%(id)s.%(ext)s'
-
-
-CACHE_DIR = '/cache'
-
-# Location of modal checkpoint.
-MODEL_DIR = pathlib.Path(CACHE_DIR, "model")
-
 
 volume = modal.SharedVolume().persist('vtscribe-cache-vol')
 
@@ -69,13 +35,13 @@ if stub.is_inside():
 
 
 @stub.function(timeout=40000, secret=modal.Secret.from_name("vtscribe-secrets"))
-@stub.web_endpoint(method="POST", wait_for_response=True)
+@stub.web_endpoint(method="POST", wait_for_response=False)
 def transcribe(video_id: str):
-    return transcribe_vod.call(JobSpec(video_id=video_id))
+    return transcribe_vod.call(config.JobSpec(video_id=video_id))
 
 
-@stub.function(image=app_image, shared_volumes={CACHE_DIR: volume}, timeout=3000)
-def transcribe_vod(job_spec: JobSpec):
+@stub.function(image=app_image, shared_volumes={config.CACHE_DIR: volume}, timeout=3000)
+def transcribe_vod(job_spec: config.JobSpec):
     """Main worker function for VOD transcription.
 
     Args:
@@ -85,16 +51,16 @@ def transcribe_vod(job_spec: JobSpec):
         _type_: _description_
     """
     download_audio.call(job_spec.yt_video_url())
-    input_raw_file_path: str = f"{CACHE_DIR}/{job_spec.video_id}.mp3"
+    input_raw_file_path: str = f"{config.CACHE_DIR}/{job_spec.video_id}.mp3"
     result_metadata = do_transcribe.call(
-        input_raw_file_path, model=job_spec.whisper_model, result_path=f"{CACHE_DIR}/{job_spec.video_id}-result.json")
+        input_raw_file_path, model=job_spec.whisper_model, result_path=f"{config.CACHE_DIR}/{job_spec.video_id}-result.json")
     upload_to_obj_storage.call(
         result_metadata['result_file_name'], result_metadata['result_path'])
 
     return JSONResponse(content=result_metadata, status_code=200)
 
 
-@stub.function(image=app_image, shared_volumes={CACHE_DIR: volume}, timeout=3000)
+@stub.function(image=app_image, shared_volumes={config.CACHE_DIR: volume}, timeout=3000)
 def download_audio(yt_video_url: str):
     """Downloads audio track for a given Youtube video URL as an mp3.
 
@@ -110,7 +76,7 @@ def download_audio(yt_video_url: str):
             'preferredcodec': 'mp3',
             'preferredquality': '192',
         }],
-        'outtmpl': CACHE_DIR + '/' + YT_DLP_DOWNLOAD_FILE_TEMPL
+        'outtmpl': config.CACHE_DIR + '/' + config.YT_DLP_DOWNLOAD_FILE_TEMPL
     }
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -120,7 +86,7 @@ def download_audio(yt_video_url: str):
 
 @stub.function(
     image=app_image,
-    shared_volumes={CACHE_DIR: volume},
+    shared_volumes={config.CACHE_DIR: volume},
     cpu=2,
     timeout=3000
 )
@@ -128,7 +94,7 @@ def transcribe_segment(
     start: float,
     end: float,
     audio_filepath: pathlib.Path,
-    model: ModelSpec,
+    model: config.ModelSpec,
 ):
     import tempfile
     import time
@@ -150,7 +116,7 @@ def transcribe_segment(
         use_gpu = torch.cuda.is_available()
         device = "cuda" if use_gpu else "cpu"
         model = whisper.load_model(
-            model.name, device=device, download_root=MODEL_DIR
+            model.name, device=device, download_root=config.MODEL_DIR
         )
         result = model.transcribe(
             f.name, language="en", fp16=use_gpu)  # type: ignore
@@ -167,8 +133,8 @@ def transcribe_segment(
     return result
 
 
-@stub.function(image=app_image, shared_volumes={CACHE_DIR: volume}, timeout=30000)
-def do_transcribe(input_audio_file_path: str, model: ModelSpec, result_path: str = "result.json") -> dict:
+@stub.function(image=app_image, shared_volumes={config.CACHE_DIR: volume}, timeout=30000)
+def do_transcribe(input_audio_file_path: str, model: config.ModelSpec, result_path: str = "result.json") -> dict:
     """Perform transcription of an audio file using Whisper.
     Returns a dict of metadata of the result
 
@@ -222,11 +188,11 @@ def do_transcribe(input_audio_file_path: str, model: ModelSpec, result_path: str
     logger.info("Finished transcribing file {} in {} seconds",
                 input_audio_file_path, exec_time)
 
-    metadata = {'result_path': result_path,
-                'result_file_name': os.path.basename(result_path),
-                'src_audio_file_name': input_audio_file_path}
-
-    logger.info("Metadata: {} cwd: {}", metadata, os.getcwd())
+    metadata = {
+        'result_path': result_path,
+        'result_file_name': os.path.basename(result_path),
+        'src_audio_file_name': input_audio_file_path
+    }
 
     return metadata
 
@@ -283,8 +249,8 @@ def split_silences(
     print(f"Split {path} into {num_segments} segments")
 
 
-@stub.function(image=app_image, shared_volumes={CACHE_DIR: volume}, timeout=3000)
-def upload_to_obj_storage(bucket_path: str, local_file_path: str, bucket_name=DO_DEFAULT_BUCKET_NAME):
+@stub.function(image=app_image, shared_volumes={config.CACHE_DIR: volume}, timeout=3000)
+def upload_to_obj_storage(bucket_path: str, local_file_path: str, bucket_name=config.DO_DEFAULT_BUCKET_NAME):
     import boto3
     import os
 
@@ -297,4 +263,5 @@ def upload_to_obj_storage(bucket_path: str, local_file_path: str, bucket_name=DO
                         aws_secret_access_key=os.environ["DO_SPACE_HOLOSAYS_SECRET"])
 
     # Upload the JSON file to the Space
-    s3.Object(bucket_name, bucket_path).put(Body=open(local_file_path, 'rb'))
+    s3.Object(bucket_name, bucket_path).put(
+        Body=open(local_file_path, 'rb'), ACL='public-read')
