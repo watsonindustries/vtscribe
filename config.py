@@ -1,6 +1,8 @@
 import dataclasses
 import logging
 import pathlib
+from typing import Optional
+
 
 def get_logger(name, level=logging.INFO):
     logger = logging.getLogger(name)
@@ -13,25 +15,45 @@ def get_logger(name, level=logging.INFO):
     logger.propagate = False  # Prevent the modal client from double-logging.
     return logger
 
+
 @dataclasses.dataclass
 class ModelSpec:
     name: str
     params: str
     relative_speed: int  # Higher is faster
-    
-DEFAULT_WHISPER_MODEL = ModelSpec(
-    name="medium.en", params="769M", relative_speed=2)
+
+
+SUPPORTED_WHISPER_MODELS = {
+    "tiny.en": ModelSpec(name="tiny.en", params="39M", relative_speed=32),
+    # Takes around 3-10 minutes to transcribe a podcast, depending on length.
+    "base.en": ModelSpec(name="base.en", params="74M", relative_speed=16),
+    "small.en": ModelSpec(name="small.en", params="244M", relative_speed=6),
+    "medium.en": ModelSpec(name="medium.en", params="769M", relative_speed=2),
+    # Very slow. Will take around 45 mins to 1.5 hours to transcribe.
+    "large": ModelSpec(name="large", params="1550M", relative_speed=1),
+}
+
+DEFAULT_WHISPER_MODEL = SUPPORTED_WHISPER_MODELS["medium.en"]
+
+
+@dataclasses.dataclass
+class Source:
+    id: Optional[str]
+    type: str = 'yt'
+    url: Optional[str]
+
 
 @dataclasses.dataclass
 class JobSpec:
-    video_id: str
-    source_type: str = 'yt'
+    source: Source
     whisper_model: ModelSpec = DEFAULT_WHISPER_MODEL
-    bucket_for_upload_name: str = 'holosays'
+    bucket_for_upload: str = 'holosays'
 
     def yt_video_url(self) -> str:
-        return 'https://www.youtube.com/watch?v=' + self.video_id
-      
+        source = self.source
+        return 'https://www.youtube.com/watch?v=' + source.id if source.id else source.url
+
+
 YT_DLP_DOWNLOAD_FILE_TEMPL = '%(id)s.%(ext)s'
 
 CACHE_DIR = '/cache'

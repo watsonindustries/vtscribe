@@ -4,7 +4,7 @@ Microservice worker that uses OpenAI's Whisper model to download and transcribe 
 import modal
 import pathlib
 import json
-from typing import Iterator, Tuple
+from typing import Iterator, Tuple, Optional
 from fastapi.responses import JSONResponse
 
 import config
@@ -25,16 +25,17 @@ app_image = (
 stub = modal.Stub(config.MODAL_STUB_NAME, image=app_image, secrets=[
                   modal.Secret.from_name(config.MODAL_SECRETS_NAME)])
 
-# Config
-
 logger = config.get_logger(__name__)
 volume = modal.SharedVolume().persist('vtscribe-cache-vol')
+
+# The main entrypoint for the app
 
 
 @stub.function(timeout=40000, secret=modal.Secret.from_name("vtscribe-secrets"))
 @stub.web_endpoint(method="POST", wait_for_response=False)
-def transcribe(video_id: str):
-    return transcribe_vod.call(config.JobSpec(video_id=video_id))
+def transcribe(source_id: Optional[str], source_type: Optional[str] = 'yt', source_url: Optional[str] = None):
+    source = config.Source(id=source_id, type=source_type, url=source_url)
+    return transcribe_vod.call(config.JobSpec(source=source))
 
 
 @stub.function(image=app_image, shared_volumes={config.CACHE_DIR: volume}, timeout=3000)
@@ -47,10 +48,13 @@ def transcribe_vod(job_spec: config.JobSpec):
     Returns:
         _type_: _description_
     """
+
+    source = job_spec.source
+
     download_audio.call(job_spec.yt_video_url())
-    input_raw_file_path: str = f"{config.CACHE_DIR}/{job_spec.video_id}.mp3"
+    input_raw_file_path: str = f"{config.CACHE_DIR}/{source.id}.mp3"
     result_metadata = do_transcribe.call(
-        input_raw_file_path, model=job_spec.whisper_model, result_path=f"{config.CACHE_DIR}/{job_spec.video_id}-result.json")
+        input_raw_file_path, model=job_spec.whisper_model, result_path=f"{config.CACHE_DIR}/{source.id}-result.json")
     upload_to_obj_storage.call(
         result_metadata['result_file_name'], result_metadata['result_path'])
 
@@ -146,6 +150,7 @@ def do_transcribe(input_audio_file_path: str, model: config.ModelSpec, result_pa
 
     start_time = time.time()
 
+    # TODO: Put downsampling into separate function
     output_file = input_audio_file_path.replace(".mp3", ".wav")
     logger.info("Downsampling file {} --> {}",
                 input_audio_file_path, output_file)
@@ -182,7 +187,8 @@ def do_transcribe(input_audio_file_path: str, model: config.ModelSpec, result_pa
 
     exec_time = end_time - start_time
 
-    logger.info(f"Finished transcribing file {input_audio_file_path} in {exec_time} seconds")
+    logger.info(
+        f"Finished transcribing file {input_audio_file_path} in {exec_time} seconds")
 
     metadata = {
         'result_path': result_path,
@@ -249,7 +255,8 @@ def upload_to_obj_storage(bucket_path: str, local_file_path: str, bucket_name=co
     import boto3
     import os
 
-    logger.info(f"Uploading to bucket: {bucket_name} to: {bucket_path} from: {local_file_path}")
+    logger.info(
+        f"Uploading to bucket: {bucket_name} to: {bucket_path} from: {local_file_path}")
 
     s3 = boto3.resource('s3',
                         endpoint_url=config.S3_ENDPOINT_URL,
