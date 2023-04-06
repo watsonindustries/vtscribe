@@ -7,7 +7,7 @@ import json
 from typing import Iterator, Tuple
 from fastapi.responses import JSONResponse
 
-from . import config
+import config
 
 app_image = (
     modal.Image.debian_slim()
@@ -16,7 +16,6 @@ app_image = (
         "boto3",
         "ffmpeg-python",
         "torchaudio==0.12.1",
-        "loguru==0.6.0",
         # Youtube API keeps changing frequently, so we want the latest and greatest
         "git+https://github.com/yt-dlp/yt-dlp.git@master",
         "https://github.com/openai/whisper/archive/9f70a352f9f8630ab3aa0d06af5cb9532bd8c21d.tar.gz"
@@ -28,10 +27,8 @@ stub = modal.Stub(config.MODAL_STUB_NAME, image=app_image, secrets=[
 
 # Config
 
+logger = config.get_logger(__name__)
 volume = modal.SharedVolume().persist('vtscribe-cache-vol')
-
-if stub.is_inside():
-    from loguru import logger  # TODO: Replace with Python Logger
 
 
 @stub.function(timeout=40000, secret=modal.Secret.from_name("vtscribe-secrets"))
@@ -81,7 +78,7 @@ def download_audio(yt_video_url: str):
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         error_code = ydl.download(yt_video_url)
-        logger.info("Finished downloading with code: {}", error_code)
+        logger.info(f"Finished downloading with code: {error_code}")
 
 
 @stub.function(
@@ -157,8 +154,8 @@ def do_transcribe(input_audio_file_path: str, model: config.ModelSpec, result_pa
                            {'ar': '16000', 'acodec': 'pcm_s16le'})
     ffmpeg.run(stream, overwrite_output=True, quiet=True)
 
-    logger.info("Finished downsampling file: {}", output_file)
-    logger.info("Preparing to transcribe file {}", output_file)
+    logger.info(f"Finished downsampling file: {output_file}")
+    logger.info(f"Preparing to transcribe file {output_file}")
 
     segment_gen = split_silences(str(output_file))
 
@@ -185,8 +182,7 @@ def do_transcribe(input_audio_file_path: str, model: config.ModelSpec, result_pa
 
     exec_time = end_time - start_time
 
-    logger.info("Finished transcribing file {} in {} seconds",
-                input_audio_file_path, exec_time)
+    logger.info(f"Finished transcribing file {input_audio_file_path} in {exec_time} seconds")
 
     metadata = {
         'result_path': result_path,
@@ -246,7 +242,6 @@ def split_silences(
     if duration > cur_start and (duration - cur_start) > min_segment_length:
         yield cur_start, duration
         num_segments += 1
-    print(f"Split {path} into {num_segments} segments")
 
 
 @stub.function(image=app_image, shared_volumes={config.CACHE_DIR: volume}, timeout=3000)
@@ -254,11 +249,10 @@ def upload_to_obj_storage(bucket_path: str, local_file_path: str, bucket_name=co
     import boto3
     import os
 
-    logger.info("Uploading to bucket: {} to: {} from: {}",
-                bucket_name, bucket_path, local_file_path)
+    logger.info(f"Uploading to bucket: {bucket_name} to: {bucket_path} from: {local_file_path}")
 
     s3 = boto3.resource('s3',
-                        endpoint_url='https://ams3.digitaloceanspaces.com',
+                        endpoint_url=config.S3_ENDPOINT_URL,
                         aws_access_key_id=os.environ["DO_SPACE_HOLOSAYS_KEY"],
                         aws_secret_access_key=os.environ["DO_SPACE_HOLOSAYS_SECRET"])
 

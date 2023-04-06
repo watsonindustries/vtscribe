@@ -1,6 +1,17 @@
 import dataclasses
+import logging
 import pathlib
 
+def get_logger(name, level=logging.INFO):
+    logger = logging.getLogger(name)
+    handler = logging.StreamHandler()
+    handler.setFormatter(
+        logging.Formatter("%(levelname)s: %(asctime)s: %(name)s  %(message)s")
+    )
+    logger.addHandler(handler)
+    logger.setLevel(level)
+    logger.propagate = False  # Prevent the modal client from double-logging.
+    return logger
 
 @dataclasses.dataclass
 class ModelSpec:
@@ -32,3 +43,4 @@ MODAL_STUB_NAME = 'vtscribe'
 MODAL_SECRETS_NAME = 'vtscribe-secrets'
 
 DO_DEFAULT_BUCKET_NAME = 'holosays'
+S3_ENDPOINT_URL = 'https://ams3.digitaloceanspaces.com'
