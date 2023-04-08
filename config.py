@@ -39,8 +39,8 @@ DEFAULT_WHISPER_MODEL = SUPPORTED_WHISPER_MODELS["medium.en"]
 @dataclasses.dataclass
 class Source:
     id: Optional[str]
-    type: str = 'yt'
     url: Optional[str]
+    type: str = 'yt'
 
 
 @dataclasses.dataclass

@@ -34,7 +34,7 @@ volume = modal.SharedVolume().persist('vtscribe-cache-vol')
 @stub.function(timeout=40000, secret=modal.Secret.from_name("vtscribe-secrets"))
 @stub.web_endpoint(method="POST", wait_for_response=False)
 def transcribe(source_id: Optional[str], source_type: Optional[str] = 'yt', source_url: Optional[str] = None):
-    source = config.Source(id=source_id, type=source_type, url=source_url)
+    source = config.Source(source_id, source_url, source_type)
     return transcribe_vod.call(config.JobSpec(source=source))
 
 
@@ -54,9 +54,9 @@ def transcribe_vod(job_spec: config.JobSpec):
     download_audio.call(job_spec.yt_video_url())
     input_raw_file_path: str = f"{config.CACHE_DIR}/{source.id}.mp3"
     result_metadata = do_transcribe.call(
-        input_raw_file_path, model=job_spec.whisper_model, result_path=f"{config.CACHE_DIR}/{source.id}-result.json")
+        input_raw_file_path, model=job_spec.whisper_model, result_path=f"{config.CACHE_DIR}/{source.id}-{source.type}-result.json")
     upload_to_obj_storage.call(
-        result_metadata['result_file_name'], result_metadata['result_path'])
+        f"transcripts/{result_metadata['result_file_name']}", result_metadata['result_path'])
 
     return JSONResponse(content=result_metadata, status_code=200)
 
@@ -152,8 +152,7 @@ def do_transcribe(input_audio_file_path: str, model: config.ModelSpec, result_pa
 
     # TODO: Put downsampling into separate function
     output_file = input_audio_file_path.replace(".mp3", ".wav")
-    logger.info("Downsampling file {} --> {}",
-                input_audio_file_path, output_file)
+    logger.info(f"Downsampling file {input_audio_file_path} --> {output_file}")
     stream = ffmpeg.input(input_audio_file_path)
     stream = ffmpeg.output(stream, output_file, **
                            {'ar': '16000', 'acodec': 'pcm_s16le'})
