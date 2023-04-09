@@ -1,7 +1,7 @@
 import dataclasses
 import logging
 import pathlib
-from typing import Optional
+from typing import Optional, Set
 
 
 def get_logger(name, level=logging.INFO):
@@ -42,6 +42,21 @@ class Source:
     url: Optional[str]
     type: str = 'yt'
 
+    @staticmethod
+    def validate_type(valid_types: Set[str], source_type: str):
+        if source_type not in valid_types:
+            raise ValueError(
+                f"Invalid type '{source_type}', must be one of {valid_types}")
+
+    def validate(self):
+        if self.url is None:
+            if not (self.id and self.type):
+                raise ValueError("Both id and type must be present")
+
+        self.validate_type({'yt'}, self.type)
+
+        return self
+
 
 @dataclasses.dataclass
 class JobSpec:
@@ -51,7 +66,7 @@ class JobSpec:
 
     def yt_video_url(self) -> str:
         source = self.source
-        return 'https://www.youtube.com/watch?v=' + source.id if source.id else source.url
+        return ('https://www.youtube.com/watch?v=' + source.id) if source.id else source.url
 
 
 YT_DLP_DOWNLOAD_FILE_TEMPL = '%(id)s.%(ext)s'

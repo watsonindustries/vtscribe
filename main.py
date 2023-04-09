@@ -33,9 +33,9 @@ volume = modal.SharedVolume().persist('vtscribe-cache-vol')
 
 @stub.function(timeout=40000, secret=modal.Secret.from_name("vtscribe-secrets"))
 @stub.web_endpoint(method="POST", wait_for_response=False)
-def transcribe(source_id: Optional[str], source_type: Optional[str] = 'yt', source_url: Optional[str] = None):
-    source = config.Source(source_id, source_url, source_type)
-    return transcribe_vod.call(config.JobSpec(source=source))
+def transcribe(source_id: Optional[str], source_type: Optional[str] = 'yt', source_url: Optional[str] = None, model_name: str = 'medium.en'):
+    source = config.Source(source_id, source_url, source_type).validate()
+    return transcribe_vod.call(config.JobSpec(source=source, whisper_model=config.SUPPORTED_WHISPER_MODELS[model_name]))
 
 
 @stub.function(image=app_image, shared_volumes={config.CACHE_DIR: volume}, timeout=3000)
@@ -265,3 +265,5 @@ def upload_to_obj_storage(bucket_path: str, local_file_path: str, bucket_name=co
     # Upload the JSON file to the Space
     s3.Object(bucket_name, bucket_path).put(
         Body=open(local_file_path, 'rb'), ACL='public-read')
+
+    logger.info(f"Directory contents: {os.listdir('.')}")
