@@ -5,9 +5,9 @@ import modal
 import pathlib
 import json
 from typing import Iterator, Tuple, Optional
-from fastapi.responses import JSONResponse
 
 import config
+import util
 
 app_image = (
     modal.Image.debian_slim()
@@ -49,16 +49,26 @@ def transcribe_vod(job_spec: config.JobSpec):
         _type_: _description_
     """
 
+    import whisper
+
     source = job_spec.source
+
+    # pre-download the model to the cache path, because the _download fn is not
+    # thread-safe.
+    whisper._download(
+        whisper._MODELS[job_spec.whisper_model.name], config.MODEL_DIR, False)
 
     download_audio.call(job_spec.yt_video_url())
     input_raw_file_path: str = f"{config.CACHE_DIR}/{source.id}.mp3"
     result_metadata = do_transcribe.call(
         input_raw_file_path, model=job_spec.whisper_model, result_path=f"{config.CACHE_DIR}/{source.id}-{source.type}-result.json")
-    upload_to_obj_storage.call(
-        f"transcripts/{result_metadata['result_file_name']}", result_metadata['result_path'])
 
-    return JSONResponse(content=result_metadata, status_code=200)
+    upload_to_obj_storage.call(
+        f"transcripts/{result_metadata['result_file_name']}", result_metadata['result_path']
+    )
+    upload_to_obj_storage.call(
+        f"transcripts/{result_metadata['result_vtt_name']}", result_metadata['result_vtt_path']
+    )
 
 
 @stub.function(image=app_image, shared_volumes={config.CACHE_DIR: volume}, timeout=3000)
@@ -178,11 +188,16 @@ def do_transcribe(input_audio_file_path: str, model: config.ModelSpec, result_pa
         "language": "en",
     }
 
+    end_time = time.time()
+
     logger.info(f"Writing openai/whisper transcription to {result_path}")
     with open(result_path, "w") as f:
         json.dump(result, f, indent=4)
 
-    end_time = time.time()
+    result_vtt_path = result_path.replace(".json", ".vtt")
+    logger.info(f"Writing VTT file to {result_vtt_path}")
+    with open(result_vtt_path, 'w', encoding='utf-8') as vtt:
+        util.write_vtt(result['segments'], file=vtt)
 
     exec_time = end_time - start_time
 
@@ -191,7 +206,9 @@ def do_transcribe(input_audio_file_path: str, model: config.ModelSpec, result_pa
 
     metadata = {
         'result_path': result_path,
+        'result_vtt_path': result_vtt_path,
         'result_file_name': os.path.basename(result_path),
+        'result_vtt_name': os.path.basename(result_vtt_path),
         'src_audio_file_name': input_audio_file_path
     }
 
@@ -265,5 +282,3 @@ def upload_to_obj_storage(bucket_path: str, local_file_path: str, bucket_name=co
     # Upload the JSON file to the Space
     s3.Object(bucket_name, bucket_path).put(
         Body=open(local_file_path, 'rb'), ACL='public-read')
-
-    logger.info(f"Directory contents: {os.listdir('.')}")
