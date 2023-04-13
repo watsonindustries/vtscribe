@@ -58,7 +58,8 @@ def transcribe_vod(job_spec: config.JobSpec):
     whisper._download(
         whisper._MODELS[job_spec.whisper_model.name], config.MODEL_DIR, False)
 
-    download_audio.call(job_spec.yt_video_url())
+    download_audio.call(job_spec.yt_video_url() if source.type ==
+                        'yt' else job_spec.twitch_video_url())
     input_raw_file_path: str = f"{config.CACHE_DIR}/{source.id}.mp3"
     result_metadata = do_transcribe.call(
         input_raw_file_path, model=job_spec.whisper_model, result_path=f"{config.CACHE_DIR}/{source.id}-{source.type}-result.json")

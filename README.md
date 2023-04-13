@@ -4,8 +4,8 @@ This is an implementation of a cloud [Modal](https://modal.com) worker that tran
 
 Still very WIP.
 
-## Quickstart
+## Development
 
 ```shell
-modal run main.py
+modal serve main.py
 ```

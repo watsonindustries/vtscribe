@@ -53,7 +53,7 @@ class Source:
             if not (self.id and self.type):
                 raise ValueError("Both id and type must be present")
 
-        self.validate_type({'yt'}, self.type)
+        self.validate_type({'yt', 'twitch'}, self.type)
 
         return self
 
@@ -67,6 +67,10 @@ class JobSpec:
     def yt_video_url(self) -> str:
         source = self.source
         return ('https://www.youtube.com/watch?v=' + source.id) if source.id else source.url
+
+    def twitch_video_url(self) -> str:
+        source = self.source
+        return ('https://www.twitch.tv/videos/' + source.id) if source.id else source.url
 
 
 YT_DLP_DOWNLOAD_FILE_TEMPL = '%(id)s.%(ext)s'
