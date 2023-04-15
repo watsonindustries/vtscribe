@@ -4,7 +4,9 @@ Microservice worker that uses OpenAI's Whisper model to download and transcribe 
 import modal
 import pathlib
 import json
-from typing import Iterator, Tuple, Optional
+from typing import Iterator, Tuple 
+from fastapi import Depends, HTTPException, status, Request
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 import config
 import util
@@ -22,6 +24,8 @@ app_image = (
     )
 )
 
+auth_scheme = HTTPBearer()
+
 stub = modal.Stub(config.MODAL_STUB_NAME, image=app_image, secrets=[
                   modal.Secret.from_name(config.MODAL_SECRETS_NAME)])
 
@@ -33,7 +37,21 @@ volume = modal.SharedVolume().persist('vtscribe-cache-vol')
 
 @stub.function(timeout=40000, secret=modal.Secret.from_name("vtscribe-secrets"))
 @stub.web_endpoint(method="POST", wait_for_response=False)
-def transcribe(source_id: Optional[str], source_type: Optional[str] = 'yt', source_url: Optional[str] = None, model_name: str = 'medium.en'):
+async def transcribe(request: Request, token: HTTPAuthorizationCredentials = Depends(auth_scheme)):  
+    import os
+      
+    if token.credentials != os.environ["VTSCRIBE_API_TOKEN"]:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect bearer token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    source_id = request.query_params.get('source_id', None)
+    source_url = request.query_params.get('source_url', None)
+    source_type = request.query_params.get('source_type', 'yt')
+    model_name = request.query_params.get('model_name', 'small.en')
+
     source = config.Source(source_id, source_url, source_type).validate()
     return transcribe_vod.call(config.JobSpec(source=source, whisper_model=config.SUPPORTED_WHISPER_MODELS[model_name]))
 
