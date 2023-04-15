@@ -4,7 +4,7 @@ Microservice worker that uses OpenAI's Whisper model to download and transcribe 
 import modal
 import pathlib
 import json
-from typing import Iterator, Tuple 
+from typing import Iterator, Tuple
 from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
@@ -37,9 +37,9 @@ volume = modal.SharedVolume().persist('vtscribe-cache-vol')
 
 @stub.function(timeout=40000, secret=modal.Secret.from_name("vtscribe-secrets"))
 @stub.web_endpoint(method="POST", wait_for_response=False)
-async def transcribe(request: Request, token: HTTPAuthorizationCredentials = Depends(auth_scheme)):  
+async def transcribe(request: Request, token: HTTPAuthorizationCredentials = Depends(auth_scheme)):
     import os
-      
+
     if token.credentials != os.environ["VTSCRIBE_API_TOKEN"]:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -88,6 +88,8 @@ def transcribe_vod(job_spec: config.JobSpec):
     upload_to_obj_storage.call(
         f"transcripts/{result_metadata['result_vtt_name']}", result_metadata['result_vtt_path']
     )
+
+    gc_artefacts.call()
 
 
 @stub.function(image=app_image, shared_volumes={config.CACHE_DIR: volume}, timeout=3000)
@@ -301,3 +303,18 @@ def upload_to_obj_storage(bucket_path: str, local_file_path: str, bucket_name=co
     # Upload the JSON file to the Space
     s3.Object(bucket_name, bucket_path).put(
         Body=open(local_file_path, 'rb'), ACL='public-read')
+
+
+@stub.function(image=app_image, shared_volumes={config.CACHE_DIR: volume})
+def gc_artefacts():
+    """Garbage collect any remains in the cache directory.
+    """
+    import os
+
+    directory = config.CACHE_DIR
+
+    logger.info(f"Garbage collecting artefacts in {directory}")
+
+    for filename in os.listdir():
+        if filename.endswith('.mp3') or filename.endswith('.wav') or filename.endswith('.json'):
+            os.remove(os.path.join(directory, filename))
