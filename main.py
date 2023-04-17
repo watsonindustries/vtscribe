@@ -4,9 +4,12 @@ Microservice worker that uses OpenAI's Whisper model to download and transcribe 
 import modal
 import pathlib
 import json
+import fastapi
 from typing import Iterator, Tuple
 from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+
+from modal.functions import FunctionCall
 
 import config
 import util
@@ -32,12 +35,17 @@ stub = modal.Stub(config.MODAL_STUB_NAME, image=app_image, secrets=[
 logger = config.get_logger(__name__)
 volume = modal.SharedVolume().persist('vtscribe-cache-vol')
 
-# The main entrypoint for the app
+web_app = fastapi.FastAPI()
 
 
-@stub.function(timeout=40000, secret=modal.Secret.from_name("vtscribe-secrets"))
-@stub.web_endpoint(method="POST", wait_for_response=False)
-async def transcribe(request: Request, token: HTTPAuthorizationCredentials = Depends(auth_scheme)):
+@stub.function()
+@stub.asgi_app()
+def fastapi_app():
+    return web_app
+
+
+@web_app.post("/webhook")
+async def accept_job(request: Request, token: HTTPAuthorizationCredentials = Depends(auth_scheme)):
     import os
 
     if token.credentials != os.environ["VTSCRIBE_API_TOKEN"]:
@@ -53,7 +61,26 @@ async def transcribe(request: Request, token: HTTPAuthorizationCredentials = Dep
     model_name = request.query_params.get('model_name', 'small.en')
 
     source = config.Source(source_id, source_url, source_type).validate()
-    return transcribe_vod.call(config.JobSpec(source=source, whisper_model=config.SUPPORTED_WHISPER_MODELS[model_name]))
+
+    call = transcribe.spawn(source, model_name)
+    return {"call_id": call.object_id}
+
+
+@web_app.get("/result/{call_id}")
+async def poll_results(call_id: str):
+    function_call = FunctionCall.from_id(call_id)
+    try:
+        return function_call.get(timeout=0)
+    except TimeoutError:
+        http_accepted_code = 202
+        return fastapi.responses.JSONResponse({}, status_code=http_accepted_code)
+
+
+@stub.function(timeout=40000, secret=modal.Secret.from_name("vtscribe-secrets"))
+async def transcribe(source: config.Source, model_name: str):
+    metadata = transcribe_vod.call(config.JobSpec(
+        source=source, whisper_model=config.SUPPORTED_WHISPER_MODELS[model_name]))
+    return fastapi.responses.JSONResponse(metadata)
 
 
 @stub.function(image=app_image, shared_volumes={config.CACHE_DIR: volume}, timeout=3000)
@@ -90,6 +117,7 @@ def transcribe_vod(job_spec: config.JobSpec):
     )
 
     gc_artefacts.call()
+    return result_metadata
 
 
 @stub.function(image=app_image, shared_volumes={config.CACHE_DIR: volume}, timeout=3000)
