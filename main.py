@@ -116,7 +116,7 @@ def transcribe_vod(job_spec: config.JobSpec):
         input_raw_file_path = os.path.join(
             config.CACHE_DIR, f"{source.id}.mp3")
         result_path = os.path.join(
-            config.CACHE_DIR, f"{source.id}-{source.type}-result.json")
+            config.CACHE_DIR, f"{source.id}--{source.type}--result.json")
 
         result_metadata: dict = do_transcribe.call(
             input_raw_file_path,
